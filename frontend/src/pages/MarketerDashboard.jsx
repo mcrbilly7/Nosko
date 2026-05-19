@@ -5,6 +5,7 @@ import DashboardLayout from "@/components/layout/DashboardLayout";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { Copy, Check } from "lucide-react";
 import { toast } from "sonner";
+import StripeConnectCard from "@/components/shared/StripeConnectCard";
 
 export default function MarketerDashboard() {
   const { user } = useAuth();
@@ -63,6 +64,8 @@ export default function MarketerDashboard() {
             </div>
           ))}
         </div>
+
+        <div className="mt-8"><StripeConnectCard /></div>
 
         <div className="mt-8 border border-black bg-white p-6">
           <div className="overline mb-3">Weekly earnings — last 12 weeks</div>

@@ -6,6 +6,7 @@ import Footer from "@/components/shared/Footer";
 import { Loader2, ShieldCheck, Briefcase, BadgeDollarSign } from "lucide-react";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
+import StripeConnectCard from "@/components/shared/StripeConnectCard";
 
 export default function AccountSettings() {
   const { user, refresh } = useAuth();
@@ -79,8 +80,11 @@ export default function AccountSettings() {
           </div>
         </div>
 
-        <div className="grid lg:grid-cols-2 gap-8 mt-10">
-          <form onSubmit={saveProfile} className="border-2 border-black p-6 grid gap-3" data-testid="account-profile-form">
+        {(user.role === "worker" || user.role === "marketer") && (
+          <div className="mt-10"><StripeConnectCard /></div>
+        )}
+
+        <div className="grid lg:grid-cols-2 gap-8 mt-10">          <form onSubmit={saveProfile} className="border-2 border-black p-6 grid gap-3" data-testid="account-profile-form">
             <div className="overline">Profile</div>
             <div>
               <label className="overline">Name</label>

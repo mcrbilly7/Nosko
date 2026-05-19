@@ -18,6 +18,7 @@ import secrets
 import string
 import smtplib
 import bcrypt
+import stripe
 import requests as http_requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -40,6 +41,9 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "Nosko Handyman")
+STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY")
+if STRIPE_API_KEY:
+    stripe.api_key = STRIPE_API_KEY
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -713,17 +717,139 @@ async def update_job_status(job_id: str, payload: dict, _: dict = Depends(requir
     return {"ok": True}
 
 
+# -------------------- Stripe Connect (Express) --------------------
+async def _get_worker_or_marketer_profile(user_id: str):
+    """Return the connect profile collection name + record for a user."""
+    w = await db.worker_profiles.find_one({"user_id": user_id}, {"_id": 0})
+    if w:
+        return "worker_profiles", w
+    m = await db.marketer_profiles.find_one({"user_id": user_id}, {"_id": 0})
+    if m:
+        return "marketer_profiles", m
+    return None, None
+
+
+@api.post("/stripe/onboard")
+async def stripe_onboard(payload: dict, user: dict = Depends(get_current_user)):
+    """Create (or reuse) an Express account for the current user and return a one-time onboarding URL."""
+    if not STRIPE_API_KEY:
+        raise HTTPException(503, "Stripe not configured")
+    origin = payload.get("origin") or "https://nosko.com"
+    coll, profile = await _get_worker_or_marketer_profile(user["user_id"])
+    if not coll:
+        raise HTTPException(400, "Sign up as a worker or marketer first")
+
+    account_id = profile.get("stripe_account_id")
+    if not account_id:
+        try:
+            account = stripe.Account.create(
+                type="express",
+                country="US",
+                email=user.get("email"),
+                capabilities={"transfers": {"requested": True}},
+                business_type="individual",
+                metadata={"user_id": user["user_id"], "role": user.get("role", "")},
+            )
+        except stripe.error.StripeError as e:
+            logger.error(f"Stripe Account.create failed: {e}")
+            raise HTTPException(502, f"Stripe error: {str(e)}")
+        account_id = account["id"]
+        await db[coll].update_one({"user_id": user["user_id"]}, {"$set": {"stripe_account_id": account_id}})
+
+    try:
+        link = stripe.AccountLink.create(
+            account=account_id,
+            refresh_url=f"{origin}/account/stripe/refresh",
+            return_url=f"{origin}/account/stripe/return",
+            type="account_onboarding",
+        )
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe AccountLink.create failed: {e}")
+        raise HTTPException(502, f"Stripe error: {str(e)}")
+    return {"url": link["url"], "stripe_account_id": account_id}
+
+
+@api.get("/stripe/status")
+async def stripe_status(user: dict = Depends(get_current_user)):
+    if not STRIPE_API_KEY:
+        raise HTTPException(503, "Stripe not configured")
+    coll, profile = await _get_worker_or_marketer_profile(user["user_id"])
+    if not coll or not profile or not profile.get("stripe_account_id"):
+        return {"connected": False, "charges_enabled": False, "payouts_enabled": False, "details_submitted": False, "requirements": {}}
+    try:
+        account = stripe.Account.retrieve(profile["stripe_account_id"])
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe Account.retrieve failed: {e}")
+        raise HTTPException(502, f"Stripe error: {str(e)}")
+    requirements = account.get("requirements") or {}
+    status_doc = {
+        "stripe_account_id": account["id"],
+        "stripe_charges_enabled": bool(account.get("charges_enabled")),
+        "stripe_payouts_enabled": bool(account.get("payouts_enabled")),
+        "stripe_details_submitted": bool(account.get("details_submitted")),
+        "stripe_requirements_currently_due": requirements.get("currently_due", []),
+        "stripe_disabled_reason": requirements.get("disabled_reason"),
+    }
+    await db[coll].update_one({"user_id": user["user_id"]}, {"$set": status_doc})
+    return {
+        "connected": True,
+        "stripe_account_id": account["id"],
+        "charges_enabled": status_doc["stripe_charges_enabled"],
+        "payouts_enabled": status_doc["stripe_payouts_enabled"],
+        "details_submitted": status_doc["stripe_details_submitted"],
+        "requirements": {
+            "currently_due": status_doc["stripe_requirements_currently_due"],
+            "disabled_reason": status_doc["stripe_disabled_reason"],
+        },
+    }
+
+
 # -------------------- Payouts / Earnings --------------------
 @api.post("/payouts")
 async def create_payout(payload: dict, _: dict = Depends(require_admin)):
+    target_uid = payload["user_id"]
+    amount = float(payload["amount"])
+    method = payload.get("method", "manual")
+    stripe_transfer_id = None
+    error_note = None
+
+    if method == "stripe":
+        if not STRIPE_API_KEY:
+            raise HTTPException(503, "Stripe not configured")
+        coll, profile = await _get_worker_or_marketer_profile(target_uid)
+        if not profile or not profile.get("stripe_account_id"):
+            raise HTTPException(400, "Recipient has no Stripe Connect account. They need to complete onboarding first.")
+        if not profile.get("stripe_payouts_enabled"):
+            # Refresh status first to be sure
+            try:
+                acct = stripe.Account.retrieve(profile["stripe_account_id"])
+                if not acct.get("payouts_enabled"):
+                    raise HTTPException(400, "Recipient's Stripe account is not yet enabled for payouts.")
+                await db[coll].update_one({"user_id": target_uid}, {"$set": {"stripe_payouts_enabled": True}})
+            except stripe.error.StripeError as e:
+                raise HTTPException(502, f"Stripe error: {str(e)}")
+        try:
+            transfer = stripe.Transfer.create(
+                amount=int(round(amount * 100)),
+                currency="usd",
+                destination=profile["stripe_account_id"],
+                transfer_group=payload.get("job_id") or f"payout_{uuid.uuid4().hex[:8]}",
+                metadata={"user_id": target_uid, "type": payload.get("type", "work")},
+            )
+            stripe_transfer_id = transfer["id"]
+        except stripe.error.StripeError as e:
+            logger.error(f"Stripe Transfer.create failed: {e}")
+            raise HTTPException(502, f"Stripe error: {str(e)}")
+
     payout = {
         "payout_id": f"pay_{uuid.uuid4().hex[:10]}",
-        "user_id": payload["user_id"],
-        "amount": float(payload["amount"]),
+        "user_id": target_uid,
+        "amount": amount,
         "type": payload.get("type", "work"),
         "job_id": payload.get("job_id"),
-        "note": payload.get("note"),
-        "method": payload.get("method", "manual"),
+        "note": payload.get("note") or error_note,
+        "method": method,
+        "stripe_transfer_id": stripe_transfer_id,
         "status": "paid",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

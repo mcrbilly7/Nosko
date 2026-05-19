@@ -1,68 +1,39 @@
-# Nosko Handyman — PRD
+# Nosko Handyman — PRD (Iter 3)
 
-## Original problem statement
-Build a website for "Nosko" handyman company. Set prices ($25 switch/outlet, $50 minimum). W9 worker + marketer signup with 15% referral profit share. Admin paying workers, earnings dashboards (weekly/monthly/yearly), portfolio + admin site editor, job request with photo upload, automated emails.
+## Iter 3 — Stripe Connect payouts + Gmail email working
+- ✅ Gmail App Password (`onglpbnyxgkwgvnb`) wired. Welcome email confirmed delivered.
+- ✅ Stripe API key (`sk_test_51TYvfc…`) wired.
+- ✅ New endpoints:
+  - `POST /api/stripe/onboard` — creates Express account (or reuses), returns one-time onboarding URL
+  - `GET /api/stripe/status` — returns charges_enabled / payouts_enabled / details_submitted / requirements; caches in DB
+  - `POST /api/payouts` (admin) — when method='stripe', performs `stripe.Transfer.create` to push money to the connected account; rejects if recipient hasn't completed onboarding
+- ✅ Frontend: `StripeConnectCard` component on Worker dashboard, Marketer dashboard, and Account settings — shows status (charges/payouts/details), CTA "Connect with Stripe" → redirects to Stripe-hosted onboarding → returns to `/account/stripe/return`.
+- ✅ All 66 backend regression tests still pass.
 
-## Iteration 2 user requirements (Feb 2026)
-- Make site cleaner and more professional ✓
-- Confirm: handyman does everything (outlet is only known price) ✓
-- **Minimum is $50 per visit** (was $25) ✓
-- Founding admins: **noskotx@gmail.com**, **nossonkosowsky32@gmail.com** ✓
-- Founding admins can change other accounts to admin/developer/worker/marketer/customer ✓
-- Forgot password + reset flow ✓ (for email/password users)
-- Automated emails on signup and quote request ✓ (Gmail SMTP)
-- noskotx@gmail.com is company email ✓
-- DFW Metroplex business ✓
-- **Full account settings page for every account** ✓
+## ⚠️ Owner action still required
+Stripe rejected `Account.create` with:
+> "You can only create new accounts if you've signed up for Connect, which you can do at https://dashboard.stripe.com/connect."
 
-## Tech stack
-- Backend: FastAPI + motor (async MongoDB) + bcrypt + smtplib + Emergent Object Storage
-- Frontend: React 19 + Tailwind + shadcn/ui + Recharts + Sonner toasts
-- Auth: hybrid — Emergent Google OAuth + email/password (bcrypt + session_token cookie)
+**Fix**: Visit https://dashboard.stripe.com/connect and click "Get started" / enable Connect on the test account that owns the API key. One-time, free, takes ~30 seconds. After that, the onboard endpoint will work.
 
-## Implemented endpoints (iter 2)
-- **Email/password auth**: `/api/auth/register`, `/api/auth/login`, `/api/auth/forgot-password`, `/api/auth/reset-password`
-- **Google OAuth**: `/api/auth/session` (Emergent OAuth exchange)
-- **Account**: `PUT /api/users/me` (name/phone/location/notify_email/password)
-- **Team management**: `GET /api/admin/users`, `PUT /api/admin/users/{id}/role` (founder-only)
-- All prior endpoints (jobs, workers, marketers, w9, payouts, portfolio, site settings) retained
+## Implemented (cumulative)
+- Hybrid auth: Google OAuth + email/password (register/login/forgot/reset)
+- Founding admins auto-promoted: `noskotx@gmail.com`, `nossonkosowsky32@gmail.com`
+- Team tab in admin (founder-only role management)
+- Account settings (every user)
+- Cleaner DFW landing with $25/swap + $50 visit minimum
+- Job request with photo upload (anon)
+- W9 signing (typed + PDF)
+- Worker/Marketer signup wizards
+- Earnings dashboards (weekly/monthly/yearly + 12-week chart)
+- Portfolio CRUD + site settings editor
+- Object storage for all uploads
+- Welcome / quote / reset emails via Gmail SMTP (live)
+- Stripe Connect Express onboarding + transfers (waiting for Connect enable)
 
-## Implemented pages (iter 2)
-- Cleaner LandingPage (removed heavy yellow blocks, added services grid, DFW callout, free-quote panel)
-- `/login`, `/register`, `/forgot-password`, `/reset-password`
-- `/account` — full account settings (any user can edit profile + password)
-- AdminDashboard: new **Team** tab — founders see role dropdown per user, non-founders see read-only list
-
-## Email notifications (Gmail SMTP)
-- Welcome email on signup
-- New-job-request → noskotx@gmail.com (company)
-- New-job-request confirmation → customer
-- Password reset link → user
-
-⚠️ **SMTP password issue**: Gmail rejects normal passwords. The provided password "Bigbilly101!" gets a 535 BadCredentials from Google. Backend handles this gracefully (no 500s) but no emails actually deliver yet. **Owner must**: enable 2-Step Verification on noskotx@gmail.com → generate App Password at https://myaccount.google.com/apppasswords → replace `SMTP_PASSWORD` in `/app/backend/.env` with the 16-char app password.
-
-## Pricing logic
-- Every visit has a **$50 minimum**. Quotes < $50 are clamped to $50 server-side.
-- Switch/outlet swap is **$25 per swap**. A single-outlet job still totals $50 (minimum). 2-outlet job = $50 (2×$25). 3-outlet job = $75. Etc. Copy updated to reflect this clearly.
-
-## Tests
-- **66/66 backend tests pass** (iter1 + iter2). See `/app/test_reports/iteration_2.json`.
-
-## Backlog (P0 → P2)
-- **P0 (owner action)**: Replace Gmail SMTP password with a real Google App Password.
-- **P1**: Real Stripe Connect Express onboarding (currently admin records payouts manually with method='stripe').
-- **P1**: Pydantic request models on POST endpoints for 422 instead of 500 on missing fields.
-- **P1**: Move SMTP sends to FastAPI BackgroundTasks (currently synchronous in async handlers — adds latency under failure).
-- **P2**: Job-status emails to customer + worker.
-- **P2**: TTL index on user_sessions.expires_at for auto-cleanup.
-- **P2**: Split server.py into modules (auth.py, jobs.py, email_service.py, storage.py).
-- **P2**: Customer-facing "track my job" page.
-
-## Founding admin behavior
-- The two founding emails are auto-promoted to admin on first sign-in via EITHER Google or email/password.
-- Founders cannot be demoted by other admins (server enforces).
-- Only founders can call `PUT /api/admin/users/{id}/role`.
-
-## Open notes
-- Original Stripe Connect (real payout flow) deferred — admin currently records payouts manually. Real Connect onboarding requires Stripe API key + Connect platform setup.
-- Frontend untested end-to-end after iter 2 changes; backend fully validated.
+## Backlog
+- **P1**: Job-completion → auto-payout (15% to marketer, remainder to worker after platform cut).
+- **P1**: Webhooks `account.updated` + `transfer.created`/`transfer.failed` for real-time status.
+- **P2**: BackgroundTasks for SMTP (currently synchronous in async handler).
+- **P2**: Pydantic models on POST endpoints (currently raw dict → 500 on missing fields).
+- **P2**: TTL index on user_sessions, split server.py into modules.

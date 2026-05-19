@@ -13,6 +13,7 @@ import RegisterPage from "@/pages/RegisterPage";
 import ForgotPasswordPage from "@/pages/ForgotPasswordPage";
 import ResetPasswordPage from "@/pages/ResetPasswordPage";
 import AccountSettings from "@/pages/AccountSettings";
+import StripeReturnPage from "@/pages/StripeReturnPage";
 import WorkerDashboard from "@/pages/WorkerDashboard";
 import MarketerDashboard from "@/pages/MarketerDashboard";
 import AdminDashboard from "@/pages/AdminDashboard";
@@ -33,6 +34,8 @@ function AppRouter() {
       <Route path="/forgot-password" element={<ForgotPasswordPage />} />
       <Route path="/reset-password" element={<ResetPasswordPage />} />
       <Route path="/account" element={<ProtectedRoute><AccountSettings /></ProtectedRoute>} />
+      <Route path="/account/stripe/return" element={<ProtectedRoute><StripeReturnPage /></ProtectedRoute>} />
+      <Route path="/account/stripe/refresh" element={<ProtectedRoute><StripeReturnPage /></ProtectedRoute>} />
       <Route path="/dashboard" element={<DashboardRedirect />} />
       <Route path="/dashboard/worker" element={<ProtectedRoute><WorkerDashboard /></ProtectedRoute>} />
       <Route path="/dashboard/marketer" element={<ProtectedRoute><MarketerDashboard /></ProtectedRoute>} />

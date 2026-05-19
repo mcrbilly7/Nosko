@@ -4,6 +4,7 @@ import { api } from "@/lib/api";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { Briefcase } from "lucide-react";
+import StripeConnectCard from "@/components/shared/StripeConnectCard";
 
 export default function WorkerDashboard() {
   const { user } = useAuth();
@@ -23,8 +24,9 @@ export default function WorkerDashboard() {
         <div className="overline">Worker dashboard</div>
         <h1 className="font-display text-4xl tracking-tighter mt-1" data-testid="worker-dashboard-title">Hi, {user?.name?.split(" ")[0]}.</h1>
 
-        <div className="grid md:grid-cols-4 gap-0 border border-black mt-8" data-testid="earnings-cards">
-          {[
+        <div className="mt-8"><StripeConnectCard /></div>
+
+        <div className="grid md:grid-cols-4 gap-0 border border-black mt-8" data-testid="earnings-cards">          {[
             { k: "weekly", l: "This week" },
             { k: "monthly", l: "Last 30 days" },
             { k: "yearly", l: "This year" },
