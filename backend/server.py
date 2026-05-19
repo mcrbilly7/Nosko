@@ -1,30 +1,45 @@
-"""Nosko Handyman backend - FastAPI + MongoDB + Emergent Google Auth + Emergent Object Storage."""
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form, Header, Query, Response, Request, Cookie
+"""Nosko Handyman backend - FastAPI + MongoDB.
+Hybrid auth: Emergent Google OAuth + custom email/password (bcrypt + session tokens).
+Emergent object storage for uploads. Gmail SMTP for transactional emails.
+"""
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form, Header, Cookie, Response, Request
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import List, Optional, Literal
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import os
 import uuid
 import logging
-import requests as http_requests
 import secrets
 import string
+import smtplib
+import bcrypt
+import requests as http_requests
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@nosko.com").lower()
+FOUNDING_ADMINS = {e.strip().lower() for e in os.environ.get("FOUNDING_ADMINS", "").split(",") if e.strip()}
+COMPANY_EMAIL = os.environ.get("COMPANY_EMAIL", "noskotx@gmail.com")
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY")
 STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
 EMERGENT_AUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
 APP_NAME = "nosko"
+
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
+SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "Nosko Handyman")
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -35,7 +50,106 @@ api = APIRouter(prefix="/api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("nosko")
 
-# -------------------- Storage helpers --------------------
+
+# -------------------- Email --------------------
+def send_email(to: str, subject: str, html: str, text: Optional[str] = None) -> bool:
+    """Send via Gmail SMTP. Returns True/False; never raises."""
+    if not (SMTP_USER and SMTP_PASSWORD):
+        logger.warning("SMTP credentials missing - email not sent")
+        return False
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = formataddr((SMTP_FROM_NAME, SMTP_USER))
+        msg["To"] = to
+        if text:
+            msg.attach(MIMEText(text, "plain"))
+        msg.attach(MIMEText(html, "html"))
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as s:
+            s.ehlo()
+            s.starttls()
+            s.login(SMTP_USER, SMTP_PASSWORD)
+            s.sendmail(SMTP_USER, [to], msg.as_string())
+        logger.info(f"Email sent → {to}")
+        return True
+    except Exception as e:
+        logger.error(f"Email send failed → {to}: {e}")
+        return False
+
+
+def email_welcome(to: str, name: str):
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#0A0A0A">
+      <div style="background:#FFD600;padding:18px 24px;border:2px solid #0A0A0A">
+        <h1 style="margin:0;font-size:28px;letter-spacing:-1px">NOSKO HANDYMAN</h1>
+      </div>
+      <div style="padding:24px;border:2px solid #0A0A0A;border-top:0">
+        <h2 style="margin:0 0 12px">Welcome, {name}.</h2>
+        <p>Your account is live. We service the <b>DFW Metroplex</b>. Switch / outlet replacement is fixed at <b>$25</b>. Minimum on any job is <b>$50</b>.</p>
+        <p>Questions? Reply to this email.</p>
+        <p style="margin-top:24px;font-size:12px;color:#666">— Nosko Handyman Co. · noskotx@gmail.com</p>
+      </div>
+    </div>
+    """
+    send_email(to, "Welcome to Nosko Handyman", html, f"Welcome, {name}. Your Nosko account is live.")
+
+
+def email_quote_to_admin(job: dict):
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+      <div style="background:#0A0A0A;color:#FFD600;padding:18px 24px">
+        <h2 style="margin:0">NEW JOB REQUEST · {job['job_id']}</h2>
+      </div>
+      <div style="padding:20px;border:1px solid #ddd;border-top:0">
+        <p><b>From:</b> {job['customer_name']} &lt;{job['customer_email']}&gt;</p>
+        <p><b>Phone:</b> {job.get('customer_phone') or '—'}</p>
+        <p><b>Service:</b> {job['service_type']}</p>
+        <p><b>Address:</b> {job['address']}</p>
+        <p><b>Description:</b><br>{job['description']}</p>
+        <p><b>Quoted:</b> ${job['quoted_amount']:.2f}</p>
+        {'<p><b>Referral:</b> ' + job['referral_code'] + '</p>' if job.get('referral_code') else ''}
+        <p><b>Photos uploaded:</b> {len(job.get('photo_paths', []))}</p>
+      </div>
+    </div>
+    """
+    send_email(COMPANY_EMAIL, f"New quote request — {job['customer_name']}", html)
+
+
+def email_quote_to_customer(job: dict):
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#0A0A0A">
+      <div style="background:#FFD600;padding:18px 24px;border:2px solid #0A0A0A">
+        <h1 style="margin:0;font-size:24px">REQUEST RECEIVED</h1>
+      </div>
+      <div style="padding:24px;border:2px solid #0A0A0A;border-top:0">
+        <p>Hey {job['customer_name']},</p>
+        <p>We got your request <b>{job['job_id']}</b> for <b>{job['service_type']}</b> at {job['address']}.</p>
+        <p>A handyman from our DFW team will be in touch shortly.</p>
+        <p>— Nosko Handyman · {COMPANY_EMAIL}</p>
+      </div>
+    </div>
+    """
+    send_email(job['customer_email'], "Your Nosko quote request", html)
+
+
+def email_reset_link(to: str, name: str, link: str):
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#0A0A0A">
+      <div style="background:#FFD600;padding:18px 24px;border:2px solid #0A0A0A">
+        <h1 style="margin:0;font-size:22px">PASSWORD RESET</h1>
+      </div>
+      <div style="padding:24px;border:2px solid #0A0A0A;border-top:0">
+        <p>Hi {name},</p>
+        <p>Click the button below to set a new password. This link expires in 1 hour.</p>
+        <p style="margin:24px 0"><a href="{link}" style="background:#0A0A0A;color:#FFD600;padding:12px 20px;text-decoration:none;border:2px solid #0A0A0A;display:inline-block">RESET PASSWORD</a></p>
+        <p style="font-size:12px;color:#666">Didn't request this? Ignore the email.</p>
+      </div>
+    </div>
+    """
+    send_email(to, "Reset your Nosko password", html, f"Reset your Nosko password: {link}")
+
+
+# -------------------- Storage --------------------
 _storage_key: Optional[str] = None
 
 
@@ -44,7 +158,6 @@ def init_storage() -> Optional[str]:
     if _storage_key:
         return _storage_key
     if not EMERGENT_LLM_KEY:
-        logger.warning("EMERGENT_LLM_KEY missing; object storage disabled")
         return None
     try:
         r = http_requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_LLM_KEY}, timeout=30)
@@ -61,12 +174,7 @@ def put_object(path: str, data: bytes, content_type: str) -> dict:
     key = init_storage()
     if not key:
         raise HTTPException(503, "Storage unavailable")
-    r = http_requests.put(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key, "Content-Type": content_type},
-        data=data,
-        timeout=120,
-    )
+    r = http_requests.put(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key, "Content-Type": content_type}, data=data, timeout=120)
     r.raise_for_status()
     return r.json()
 
@@ -81,93 +189,67 @@ def get_object(path: str):
 
 
 # -------------------- Models --------------------
-class User(BaseModel):
-    user_id: str
-    email: str
-    name: str
-    picture: Optional[str] = None
-    role: Literal["customer", "worker", "marketer", "admin"] = "customer"
-    referral_code: Optional[str] = None  # marketers only
-    created_at: str
-
-
-class WorkerProfile(BaseModel):
-    user_id: str
-    hours_per_week: Optional[int] = None
-    skills: List[str] = []
-    location: Optional[str] = None
-    phone: Optional[str] = None
-    bio: Optional[str] = None
-    stripe_account_id: Optional[str] = None
-    created_at: str
-
-
-class MarketerProfile(BaseModel):
-    user_id: str
-    referral_code: str
-    phone: Optional[str] = None
-    location: Optional[str] = None
-    stripe_account_id: Optional[str] = None
-    created_at: str
-
-
-class JobRequest(BaseModel):
-    job_id: str
-    customer_name: str
-    customer_email: str
-    customer_phone: Optional[str] = None
-    address: str
-    service_type: str
-    description: str
-    photo_paths: List[str] = []
-    referral_code: Optional[str] = None
-    quoted_amount: float = 25.0
-    status: Literal["new", "assigned", "in_progress", "completed", "cancelled"] = "new"
-    assigned_worker_id: Optional[str] = None
-    created_at: str
-
-
-class W9Record(BaseModel):
-    user_id: str
-    full_legal_name: str
-    business_name: Optional[str] = None
-    ssn_or_ein: str
-    address: str
-    tax_classification: str
-    typed_signature: str
-    pdf_path: Optional[str] = None
-    signed_at: str
-
-
-class Payout(BaseModel):
-    payout_id: str
-    user_id: str
-    amount: float
-    type: Literal["work", "referral"]
-    job_id: Optional[str] = None
-    note: Optional[str] = None
-    method: Literal["stripe", "manual"] = "manual"
-    status: Literal["pending", "paid"] = "paid"
-    created_at: str
-
-
-class PortfolioPhoto(BaseModel):
-    photo_id: str
-    title: str
-    description: Optional[str] = None
-    storage_path: str
-    created_at: str
-
-
 class SiteSettings(BaseModel):
-    hero_title: str = "Fast, fair, fixed-price repairs."
-    hero_subtitle: str = "Switch or outlet replacement starting at $25. $25 minimum on every job."
+    hero_title: str = "Full handyman service, fixed honest pricing."
+    hero_subtitle: str = "Switch & outlet replacement set at $25. Every job has a $50 minimum. Based in the DFW Metroplex."
     contact_phone: str = "(555) 123-4567"
-    contact_email: str = "hello@nosko.com"
-    service_area: str = "Greater Metro Area"
+    contact_email: str = "noskotx@gmail.com"
+    service_area: str = "DFW Metroplex"
+    minimum_charge: float = 50.0
+    outlet_price: float = 25.0
 
 
-# -------------------- Auth --------------------
+# -------------------- Helpers --------------------
+def hash_password(pw: str) -> str:
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(pw: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(pw.encode(), hashed.encode())
+    except Exception:
+        return False
+
+
+def gen_referral_code(name: str) -> str:
+    base = "".join(c for c in (name or "NOSKO").upper() if c.isalpha())[:4] or "NOSKO"
+    suffix = "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(4))
+    return f"{base}-{suffix}"
+
+
+def new_session_token() -> str:
+    return secrets.token_urlsafe(48)
+
+
+def role_for_email(email: str, default: str = "customer") -> str:
+    return "admin" if email.lower() in FOUNDING_ADMINS else default
+
+
+def serialize_user(u: dict) -> dict:
+    u = dict(u)
+    u.pop("_id", None)
+    u.pop("password_hash", None)
+    return u
+
+
+async def create_session(user_id: str, token: Optional[str] = None) -> str:
+    token = token or new_session_token()
+    await db.user_sessions.insert_one({
+        "user_id": user_id,
+        "session_token": token,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return token
+
+
+def set_session_cookie(resp: Response, token: str):
+    resp.set_cookie(
+        key="session_token", value=token, httponly=True, secure=True,
+        samesite="none", path="/", max_age=7 * 24 * 60 * 60,
+    )
+
+
 async def get_session_token(authorization: Optional[str] = Header(None), session_token: Optional[str] = Cookie(None)) -> Optional[str]:
     if session_token:
         return session_token
@@ -196,17 +278,119 @@ async def get_current_user(token: Optional[str] = Depends(get_session_token)) ->
 
 
 async def require_admin(user: dict = Depends(get_current_user)) -> dict:
-    if user.get("role") != "admin":
+    if user.get("role") not in ("admin", "developer"):
         raise HTTPException(403, "Admin only")
     return user
 
 
-def gen_referral_code(name: str) -> str:
-    base = "".join(c for c in name.upper() if c.isalpha())[:4] or "NOSKO"
-    suffix = "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(4))
-    return f"{base}-{suffix}"
+async def require_founder(user: dict = Depends(get_current_user)) -> dict:
+    if user.get("email", "").lower() not in FOUNDING_ADMINS:
+        raise HTTPException(403, "Founder only")
+    return user
 
 
+# -------------------- Auth: email/password --------------------
+@api.post("/auth/register")
+async def register(payload: dict):
+    email = (payload.get("email") or "").lower().strip()
+    password = payload.get("password") or ""
+    name = (payload.get("name") or "").strip() or email.split("@")[0]
+    if not email or "@" not in email:
+        raise HTTPException(400, "Valid email required")
+    if len(password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    if existing:
+        raise HTTPException(409, "Email already registered")
+    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    role = role_for_email(email)
+    now = datetime.now(timezone.utc).isoformat()
+    await db.users.insert_one({
+        "user_id": user_id,
+        "email": email,
+        "name": name,
+        "picture": None,
+        "role": role,
+        "password_hash": hash_password(password),
+        "phone": None,
+        "location": None,
+        "notify_email": True,
+        "auth_provider": "password",
+        "referral_code": None,
+        "created_at": now,
+    })
+    token = await create_session(user_id)
+    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+    # welcome email (non-blocking failure)
+    email_welcome(email, name)
+    resp = JSONResponse({"user": user_doc, "session_token": token})
+    set_session_cookie(resp, token)
+    return resp
+
+
+@api.post("/auth/login")
+async def login(payload: dict):
+    email = (payload.get("email") or "").lower().strip()
+    password = payload.get("password") or ""
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user or not user.get("password_hash") or not verify_password(password, user["password_hash"]):
+        raise HTTPException(401, "Invalid email or password")
+    # Re-promote if email is a founder
+    if email in FOUNDING_ADMINS and user.get("role") != "admin":
+        await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"role": "admin"}})
+        user["role"] = "admin"
+    token = await create_session(user["user_id"])
+    user_doc = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0, "password_hash": 0})
+    resp = JSONResponse({"user": user_doc, "session_token": token})
+    set_session_cookie(resp, token)
+    return resp
+
+
+@api.post("/auth/forgot-password")
+async def forgot_password(payload: dict, request: Request):
+    email = (payload.get("email") or "").lower().strip()
+    origin = payload.get("origin") or str(request.base_url).rstrip("/")
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if user and user.get("password_hash"):
+        token = secrets.token_urlsafe(32)
+        await db.password_reset_tokens.insert_one({
+            "token": token,
+            "user_id": user["user_id"],
+            "email": email,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            "used": False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        link = f"{origin}/reset-password?token={token}"
+        email_reset_link(email, user.get("name") or email, link)
+    # Always return ok to avoid leaking which emails exist
+    return {"ok": True}
+
+
+@api.post("/auth/reset-password")
+async def reset_password(payload: dict):
+    token = payload.get("token")
+    new_password = payload.get("password") or ""
+    if not token:
+        raise HTTPException(400, "Token required")
+    if len(new_password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+    rec = await db.password_reset_tokens.find_one({"token": token, "used": False}, {"_id": 0})
+    if not rec:
+        raise HTTPException(400, "Invalid or expired token")
+    expires_at = rec["expires_at"]
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        raise HTTPException(400, "Token expired")
+    await db.users.update_one({"user_id": rec["user_id"]}, {"$set": {"password_hash": hash_password(new_password)}})
+    await db.password_reset_tokens.update_one({"token": token}, {"$set": {"used": True}})
+    return {"ok": True}
+
+
+# -------------------- Auth: Emergent OAuth --------------------
 @api.post("/auth/session")
 async def auth_session(payload: dict):
     """Exchange Emergent session_id for our internal session_token."""
@@ -222,56 +406,50 @@ async def auth_session(payload: dict):
         raise HTTPException(401, "Auth exchange failed")
 
     email = data["email"].lower()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).isoformat()
     existing = await db.users.find_one({"email": email}, {"_id": 0})
+    is_new = False
     if existing:
         user_id = existing["user_id"]
-        # Re-promote to admin if matches admin email (idempotent)
-        if email == ADMIN_EMAIL and existing.get("role") != "admin":
-            await db.users.update_one({"user_id": user_id}, {"$set": {"role": "admin"}})
-        await db.users.update_one(
-            {"user_id": user_id},
-            {"$set": {"name": data.get("name", existing.get("name")), "picture": data.get("picture")}}
-        )
+        update = {"name": data.get("name", existing.get("name")), "picture": data.get("picture")}
+        if email in FOUNDING_ADMINS and existing.get("role") != "admin":
+            update["role"] = "admin"
+        await db.users.update_one({"user_id": user_id}, {"$set": update})
     else:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
-        role = "admin" if email == ADMIN_EMAIL else "customer"
         await db.users.insert_one({
             "user_id": user_id,
             "email": email,
             "name": data.get("name", email),
             "picture": data.get("picture"),
-            "role": role,
+            "role": role_for_email(email),
+            "auth_provider": "google",
+            "phone": None,
+            "location": None,
+            "notify_email": True,
             "referral_code": None,
-            "created_at": now.isoformat(),
+            "created_at": now,
         })
+        is_new = True
 
     session_token = data["session_token"]
-    expires_at = now + timedelta(days=7)
     await db.user_sessions.insert_one({
         "user_id": user_id,
         "session_token": session_token,
-        "expires_at": expires_at.isoformat(),
-        "created_at": now.isoformat(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+        "created_at": now,
     })
-
-    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+    if is_new:
+        email_welcome(email, user_doc.get("name") or email)
     resp = JSONResponse({"user": user_doc, "session_token": session_token})
-    resp.set_cookie(
-        key="session_token",
-        value=session_token,
-        httponly=True,
-        secure=True,
-        samesite="none",
-        path="/",
-        max_age=7 * 24 * 60 * 60,
-    )
+    set_session_cookie(resp, session_token)
     return resp
 
 
 @api.get("/auth/me")
 async def auth_me(user: dict = Depends(get_current_user)):
-    return user
+    return serialize_user(user)
 
 
 @api.post("/auth/logout")
@@ -283,7 +461,24 @@ async def auth_logout(token: Optional[str] = Depends(get_session_token)):
     return resp
 
 
-# -------------------- Role / Profile setup --------------------
+# -------------------- Account settings --------------------
+@api.put("/users/me")
+async def update_me(payload: dict, user: dict = Depends(get_current_user)):
+    update = {}
+    for k in ("name", "phone", "location", "notify_email"):
+        if k in payload:
+            update[k] = payload[k]
+    if "password" in payload and payload["password"]:
+        if len(payload["password"]) < 8:
+            raise HTTPException(400, "Password must be at least 8 characters")
+        update["password_hash"] = hash_password(payload["password"])
+    if update:
+        await db.users.update_one({"user_id": user["user_id"]}, {"$set": update})
+    new_user = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0, "password_hash": 0})
+    return new_user
+
+
+# -------------------- Role/profile setup --------------------
 @api.post("/workers/signup")
 async def worker_signup(payload: dict, user: dict = Depends(get_current_user)):
     now = datetime.now(timezone.utc).isoformat()
@@ -298,7 +493,7 @@ async def worker_signup(payload: dict, user: dict = Depends(get_current_user)):
         "created_at": now,
     }
     await db.worker_profiles.update_one({"user_id": user["user_id"]}, {"$set": profile}, upsert=True)
-    if user.get("role") not in ("admin",):
+    if user.get("role") in ("customer", None):
         await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"role": "worker"}})
     return {"ok": True, "profile": profile}
 
@@ -313,7 +508,7 @@ async def worker_me(user: dict = Depends(get_current_user)):
 async def list_workers(_: dict = Depends(require_admin)):
     workers = await db.worker_profiles.find({}, {"_id": 0}).to_list(1000)
     for w in workers:
-        u = await db.users.find_one({"user_id": w["user_id"]}, {"_id": 0})
+        u = await db.users.find_one({"user_id": w["user_id"]}, {"_id": 0, "password_hash": 0})
         w["user"] = u
     return workers
 
@@ -321,7 +516,6 @@ async def list_workers(_: dict = Depends(require_admin)):
 @api.post("/marketers/signup")
 async def marketer_signup(payload: dict, user: dict = Depends(get_current_user)):
     now = datetime.now(timezone.utc).isoformat()
-    # Generate referral code if not set
     code = user.get("referral_code")
     if not code:
         for _ in range(5):
@@ -340,7 +534,7 @@ async def marketer_signup(payload: dict, user: dict = Depends(get_current_user))
         "created_at": now,
     }
     await db.marketer_profiles.update_one({"user_id": user["user_id"]}, {"$set": profile}, upsert=True)
-    if user.get("role") not in ("admin",):
+    if user.get("role") in ("customer", None):
         await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"role": "marketer"}})
     return {"ok": True, "referral_code": code, "profile": profile}
 
@@ -355,7 +549,7 @@ async def marketer_me(user: dict = Depends(get_current_user)):
 async def list_marketers(_: dict = Depends(require_admin)):
     marketers = await db.marketer_profiles.find({}, {"_id": 0}).to_list(1000)
     for m in marketers:
-        u = await db.users.find_one({"user_id": m["user_id"]}, {"_id": 0})
+        u = await db.users.find_one({"user_id": m["user_id"]}, {"_id": 0, "password_hash": 0})
         m["user"] = u
         m["referral_count"] = await db.jobs.count_documents({"referral_code": m["referral_code"]})
     return marketers
@@ -363,10 +557,32 @@ async def list_marketers(_: dict = Depends(require_admin)):
 
 @api.get("/referral/{code}")
 async def referral_check(code: str):
-    user = await db.users.find_one({"referral_code": code.upper()}, {"_id": 0, "name": 1, "referral_code": 1})
-    if not user:
+    u = await db.users.find_one({"referral_code": code.upper()}, {"_id": 0, "name": 1, "referral_code": 1})
+    if not u:
         return {"valid": False}
-    return {"valid": True, "marketer_name": user.get("name")}
+    return {"valid": True, "marketer_name": u.get("name")}
+
+
+# -------------------- Team (founder-only) --------------------
+@api.get("/admin/users")
+async def list_all_users(_: dict = Depends(require_admin)):
+    users = await db.users.find({}, {"_id": 0, "password_hash": 0}).sort("created_at", -1).to_list(2000)
+    return users
+
+
+@api.put("/admin/users/{user_id}/role")
+async def set_user_role(user_id: str, payload: dict, founder: dict = Depends(require_founder)):
+    role = payload.get("role")
+    if role not in ("customer", "worker", "marketer", "developer", "admin"):
+        raise HTTPException(400, "Invalid role")
+    target = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+    if not target:
+        raise HTTPException(404, "User not found")
+    # Founders cannot be demoted by other founders accidentally — block role change on founder emails
+    if target.get("email", "").lower() in FOUNDING_ADMINS and role != "admin":
+        raise HTTPException(400, "Cannot change role of founding admin")
+    await db.users.update_one({"user_id": user_id}, {"$set": {"role": role}})
+    return {"ok": True, "user_id": user_id, "role": role}
 
 
 # -------------------- W9 --------------------
@@ -396,10 +612,6 @@ async def w9_me(user: dict = Depends(get_current_user)):
 # -------------------- Files --------------------
 @api.post("/upload")
 async def upload(file: UploadFile = File(...), folder: str = Form("misc")):
-    """Public-ish upload used for job photos, portfolio, W9 PDFs.
-
-    No auth required for job-photo uploads so anonymous customers can attach images.
-    """
     ext = (file.filename.rsplit(".", 1)[-1] if "." in (file.filename or "") else "bin").lower()
     safe_folder = "".join(c for c in folder if c.isalnum() or c in ("-", "_")) or "misc"
     path = f"{APP_NAME}/{safe_folder}/{uuid.uuid4().hex}.{ext}"
@@ -429,30 +641,41 @@ async def download(path: str):
 # -------------------- Jobs --------------------
 @api.post("/jobs")
 async def create_job(payload: dict):
-    """Public endpoint - customers can submit a request without login."""
     now = datetime.now(timezone.utc).isoformat()
     referral_code = (payload.get("referral_code") or "").upper().strip() or None
     if referral_code:
         ref = await db.users.find_one({"referral_code": referral_code}, {"_id": 0})
         if not ref:
             referral_code = None
+    settings_doc = await db.site_settings.find_one({"key": "default"}, {"_id": 0, "key": 0})
+    minimum = float((settings_doc or {}).get("minimum_charge", 50.0))
+    outlet = float((settings_doc or {}).get("outlet_price", 25.0))
+    service_type = payload.get("service_type", "Switch/Outlet Replacement")
+    base = outlet if "switch" in service_type.lower() or "outlet" in service_type.lower() else minimum
+    quoted = max(float(payload.get("quoted_amount") or base), minimum)
     job = {
         "job_id": f"job_{uuid.uuid4().hex[:10]}",
         "customer_name": payload["customer_name"],
         "customer_email": payload["customer_email"],
         "customer_phone": payload.get("customer_phone"),
         "address": payload["address"],
-        "service_type": payload.get("service_type", "Switch/Outlet Replacement"),
+        "service_type": service_type,
         "description": payload.get("description", ""),
         "photo_paths": payload.get("photo_paths", []),
         "referral_code": referral_code,
-        "quoted_amount": float(payload.get("quoted_amount") or 25.0),
+        "quoted_amount": quoted,
         "status": "new",
         "assigned_worker_id": None,
         "created_at": now,
     }
     await db.jobs.insert_one(job)
     job.pop("_id", None)
+    # Fire-and-forget emails (sync — but small)
+    try:
+        email_quote_to_admin(job)
+        email_quote_to_customer(job)
+    except Exception as e:
+        logger.error(f"Email dispatch failed for {job['job_id']}: {e}")
     return job
 
 
@@ -535,12 +758,6 @@ async def earnings_summary(user: dict = Depends(get_current_user)):
         cur = db.payouts.find(q, {"_id": 0, "amount": 1})
         return round(sum([p["amount"] async for p in cur]), 2)
 
-    weekly = await total(week_ago)
-    monthly = await total(month_ago)
-    yearly = await total(year_ago)
-    all_time = await total(None)
-
-    # Series for chart: last 12 weeks
     series = []
     for i in range(11, -1, -1):
         start = (now - timedelta(days=(i + 1) * 7)).isoformat()
@@ -552,7 +769,13 @@ async def earnings_summary(user: dict = Depends(get_current_user)):
         s = round(sum([p["amount"] async for p in cur]), 2)
         series.append({"week": f"W-{i}", "amount": s})
 
-    return {"weekly": weekly, "monthly": monthly, "yearly": yearly, "all_time": all_time, "series": series}
+    return {
+        "weekly": await total(week_ago),
+        "monthly": await total(month_ago),
+        "yearly": await total(year_ago),
+        "all_time": await total(None),
+        "series": series,
+    }
 
 
 # -------------------- Portfolio + Site Settings --------------------
@@ -609,6 +832,7 @@ async def admin_stats(_: dict = Depends(require_admin)):
         "jobs_completed": await db.jobs.count_documents({"status": "completed"}),
         "workers": await db.worker_profiles.count_documents({}),
         "marketers": await db.marketer_profiles.count_documents({}),
+        "users_total": await db.users.count_documents({}),
         "payouts_total": sum(
             [p["amount"] async for p in db.payouts.find({"status": "paid"}, {"_id": 0, "amount": 1})]
         ),
@@ -635,6 +859,13 @@ app.add_middleware(
 @app.on_event("startup")
 async def _startup():
     init_storage()
+    try:
+        await db.users.create_index("email", unique=True)
+        await db.users.create_index("referral_code")
+        await db.password_reset_tokens.create_index("token", unique=True)
+        await db.user_sessions.create_index("session_token", unique=True)
+    except Exception as e:
+        logger.warning(f"Index creation: {e}")
 
 
 @app.on_event("shutdown")

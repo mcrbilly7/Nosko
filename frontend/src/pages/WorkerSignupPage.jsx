@@ -11,7 +11,7 @@ import { toast } from "sonner";
 const SKILL_OPTIONS = ["Electrical", "Plumbing", "Carpentry", "Drywall", "Painting", "Appliance install", "General handyman"];
 
 export default function WorkerSignupPage() {
-  const { user, login, loading } = useAuth();
+  const { user, loginWithGoogle: login, loading } = useAuth();
   const navigate = useNavigate();
   const [step, setStep] = useState(1); // 1 = profile, 2 = W9, 3 = done
   const [busy, setBusy] = useState(false);
@@ -74,9 +74,12 @@ export default function WorkerSignupPage() {
           <div className="overline">Handyman application</div>
           <h1 className="font-display text-5xl mt-2 tracking-tighter">Sign in to start.</h1>
           <p className="text-neutral-700 mt-3 max-w-lg">
-            We use Google sign-in. After signing in, you'll set your hours, skills, location and sign your W9.
+            Sign in to start. After signing in, you'll set your hours, skills, location and sign your W9.
           </p>
-          <button className="btn-brutal mt-8" onClick={login} data-testid="worker-signin-btn">Sign in with Google</button>
+          <div className="flex flex-wrap gap-3 mt-8">
+            <button className="btn-brutal" onClick={login} data-testid="worker-signin-btn">Continue with Google</button>
+            <a href="/login" className="btn-brutal ghost" data-testid="worker-signin-email-btn">Email & password</a>
+          </div>
         </main>
         <Footer />
       </div>

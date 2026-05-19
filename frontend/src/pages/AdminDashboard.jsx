@@ -4,8 +4,10 @@ import { api, fileUrl } from "@/lib/api";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import FileUploader from "@/components/shared/FileUploader";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Image as ImageIcon, Trash2, Send, DollarSign } from "lucide-react";
+import { Image as ImageIcon, Trash2, Send, DollarSign, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
+
+const FOUNDING_EMAILS = ["noskotx@gmail.com", "nossonkosowsky32@gmail.com"];
 
 export default function AdminDashboard() {
   const { user } = useAuth();
@@ -13,14 +15,18 @@ export default function AdminDashboard() {
   const [jobs, setJobs] = useState([]);
   const [workers, setWorkers] = useState([]);
   const [marketers, setMarketers] = useState([]);
+  const [users, setUsers] = useState([]);
   const [portfolio, setPortfolio] = useState([]);
   const [settings, setSettings] = useState({});
+
+  const isFounder = user?.email && FOUNDING_EMAILS.includes(user.email.toLowerCase());
 
   const refreshAll = () => {
     api.get("/admin/stats").then((r) => setStats(r.data)).catch(() => {});
     api.get("/jobs").then((r) => setJobs(r.data || [])).catch(() => {});
     api.get("/workers").then((r) => setWorkers(r.data || [])).catch(() => {});
     api.get("/marketers").then((r) => setMarketers(r.data || [])).catch(() => {});
+    api.get("/admin/users").then((r) => setUsers(r.data || [])).catch(() => {});
     api.get("/portfolio").then((r) => setPortfolio(r.data || [])).catch(() => {});
     api.get("/site/settings").then((r) => setSettings(r.data)).catch(() => {});
   };
@@ -29,30 +35,23 @@ export default function AdminDashboard() {
 
   const assignWorker = async (jobId, workerId) => {
     if (!workerId) return;
-    try {
-      await api.put(`/jobs/${jobId}/assign`, { worker_id: workerId });
-      toast.success("Assigned");
-      refreshAll();
-    } catch (e) { toast.error("Assign failed"); }
+    try { await api.put(`/jobs/${jobId}/assign`, { worker_id: workerId }); toast.success("Assigned"); refreshAll(); }
+    catch { toast.error("Assign failed"); }
   };
-
   const setStatus = async (jobId, status) => {
-    try {
-      await api.put(`/jobs/${jobId}/status`, { status });
-      toast.success("Updated");
-      refreshAll();
-    } catch (e) { toast.error("Update failed"); }
+    try { await api.put(`/jobs/${jobId}/status`, { status }); toast.success("Updated"); refreshAll(); }
+    catch { toast.error("Update failed"); }
   };
-
   const payUser = async (userId, type) => {
     const amt = prompt("Amount to pay (USD):");
     if (!amt) return;
     const note = prompt("Note (optional):") || "";
-    try {
-      await api.post("/payouts", { user_id: userId, amount: parseFloat(amt), type, note, method: "stripe" });
-      toast.success("Payout recorded");
-      refreshAll();
-    } catch (e) { toast.error("Payout failed"); }
+    try { await api.post("/payouts", { user_id: userId, amount: parseFloat(amt), type, note, method: "stripe" }); toast.success("Payout recorded"); refreshAll(); }
+    catch { toast.error("Payout failed"); }
+  };
+  const changeRole = async (uid, role) => {
+    try { await api.put(`/admin/users/${uid}/role`, { role }); toast.success("Role updated"); refreshAll(); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
 
   return (
@@ -61,31 +60,32 @@ export default function AdminDashboard() {
         <div className="overline">Admin</div>
         <h1 className="font-display text-4xl tracking-tighter mt-1" data-testid="admin-title">Command center</h1>
 
-        <div className="grid md:grid-cols-5 gap-0 border border-black mt-6" data-testid="admin-stats">
+        <div className="grid md:grid-cols-6 gap-0 border border-black mt-6" data-testid="admin-stats">
           {[
             { l: "New jobs", v: stats.jobs_new || 0, hl: true },
             { l: "Total jobs", v: stats.jobs_total || 0 },
             { l: "Completed", v: stats.jobs_completed || 0 },
             { l: "Workers", v: stats.workers || 0 },
             { l: "Marketers", v: stats.marketers || 0 },
+            { l: "All users", v: stats.users_total || 0 },
           ].map((c) => (
             <div key={c.l} className={`p-5 border-r border-black last:border-r-0 ${c.hl ? "bg-[#FFD600]" : "bg-white"}`}>
               <div className="overline">{c.l}</div>
-              <div className="font-display text-4xl tracking-tighter mt-1">{c.v}</div>
+              <div className="font-display text-3xl tracking-tighter mt-1">{c.v}</div>
             </div>
           ))}
         </div>
 
         <Tabs defaultValue="jobs" className="mt-8">
-          <TabsList className="bg-black text-white rounded-none border-2 border-black p-0 h-auto">
-            <TabsTrigger value="jobs" className="rounded-none data-[state=active]:bg-[#FFD600] data-[state=active]:text-black overline px-4 py-2" data-testid="tab-jobs">Jobs</TabsTrigger>
-            <TabsTrigger value="workers" className="rounded-none data-[state=active]:bg-[#FFD600] data-[state=active]:text-black overline px-4 py-2" data-testid="tab-workers">Workers</TabsTrigger>
-            <TabsTrigger value="marketers" className="rounded-none data-[state=active]:bg-[#FFD600] data-[state=active]:text-black overline px-4 py-2" data-testid="tab-marketers">Marketers</TabsTrigger>
-            <TabsTrigger value="portfolio" className="rounded-none data-[state=active]:bg-[#FFD600] data-[state=active]:text-black overline px-4 py-2" data-testid="tab-portfolio">Portfolio</TabsTrigger>
-            <TabsTrigger value="settings" className="rounded-none data-[state=active]:bg-[#FFD600] data-[state=active]:text-black overline px-4 py-2" data-testid="tab-settings">Settings</TabsTrigger>
+          <TabsList className="bg-black text-white rounded-none border-2 border-black p-0 h-auto flex flex-wrap">
+            {[
+              ["jobs", "Jobs"], ["workers", "Workers"], ["marketers", "Marketers"],
+              ["team", "Team"], ["portfolio", "Portfolio"], ["settings", "Settings"],
+            ].map(([v, l]) => (
+              <TabsTrigger key={v} value={v} className="rounded-none data-[state=active]:bg-[#FFD600] data-[state=active]:text-black overline px-4 py-2" data-testid={`tab-${v}`}>{l}</TabsTrigger>
+            ))}
           </TabsList>
 
-          {/* JOBS */}
           <TabsContent value="jobs" className="mt-4">
             <div className="border-2 border-black bg-white" data-testid="admin-jobs-section">
               {jobs.length === 0 ? <p className="p-6 text-sm text-neutral-500">No job requests yet.</p> : (
@@ -115,11 +115,7 @@ export default function AdminDashboard() {
                           ))}
                         </select>
                         <select className="mt-2" onChange={(e) => setStatus(j.job_id, e.target.value)} value={j.status} data-testid={`status-${j.job_id}`}>
-                          <option value="new">new</option>
-                          <option value="assigned">assigned</option>
-                          <option value="in_progress">in_progress</option>
-                          <option value="completed">completed</option>
-                          <option value="cancelled">cancelled</option>
+                          <option value="new">new</option><option value="assigned">assigned</option><option value="in_progress">in_progress</option><option value="completed">completed</option><option value="cancelled">cancelled</option>
                         </select>
                       </div>
                       <div className="lg:col-span-2 text-right">
@@ -134,7 +130,6 @@ export default function AdminDashboard() {
             </div>
           </TabsContent>
 
-          {/* WORKERS */}
           <TabsContent value="workers" className="mt-4">
             <div className="border-2 border-black bg-white" data-testid="admin-workers-section">
               {workers.length === 0 ? <p className="p-6 text-sm text-neutral-500">No workers yet.</p> : (
@@ -165,7 +160,6 @@ export default function AdminDashboard() {
             </div>
           </TabsContent>
 
-          {/* MARKETERS */}
           <TabsContent value="marketers" className="mt-4">
             <div className="border-2 border-black bg-white" data-testid="admin-marketers-section">
               {marketers.length === 0 ? <p className="p-6 text-sm text-neutral-500">No marketers yet.</p> : (
@@ -196,12 +190,55 @@ export default function AdminDashboard() {
             </div>
           </TabsContent>
 
-          {/* PORTFOLIO */}
+          <TabsContent value="team" className="mt-4">
+            <div className="border-2 border-black bg-white" data-testid="admin-team-section">
+              <div className="p-4 border-b border-black bg-[#F9FAFB] flex items-center justify-between">
+                <div>
+                  <div className="overline">All users · {users.length}</div>
+                  <div className="text-sm text-neutral-700">Founders can change anyone's role. Admins & developers see this list read-only.</div>
+                </div>
+                {!isFounder && <span className="overline text-[10px] inline-flex items-center gap-1 bg-yellow-100 border border-black px-2 py-1"><ShieldAlert className="w-3 h-3" /> Founder-only edits</span>}
+              </div>
+              <table className="w-full text-sm">
+                <thead className="bg-[#F9FAFB] overline text-[10px]">
+                  <tr><th className="p-3 text-left">User</th><th className="p-3 text-left">Auth</th><th className="p-3 text-left">Role</th><th className="p-3 text-left">Joined</th><th className="p-3 text-right">{isFounder ? "Set role" : ""}</th></tr>
+                </thead>
+                <tbody>
+                  {users.map((u) => {
+                    const isThisFounder = FOUNDING_EMAILS.includes((u.email || "").toLowerCase());
+                    return (
+                      <tr key={u.user_id} className="border-t border-neutral-200">
+                        <td className="p-3">
+                          <div className="font-display tracking-tight">{u.name}</div>
+                          <div className="font-mono text-xs text-neutral-500">{u.email}</div>
+                          {isThisFounder && <span className="overline text-[9px] bg-[#FFD600] border border-black px-1.5 py-0.5">FOUNDER</span>}
+                        </td>
+                        <td className="p-3 text-xs uppercase font-mono">{u.auth_provider || "—"}</td>
+                        <td className="p-3"><span className="overline text-[10px] bg-black text-[#FFD600] px-2 py-0.5 capitalize">{u.role}</span></td>
+                        <td className="p-3 text-xs text-neutral-500">{u.created_at?.slice(0, 10)}</td>
+                        <td className="p-3 text-right">
+                          {isFounder && !isThisFounder ? (
+                            <select value={u.role} onChange={(e) => changeRole(u.user_id, e.target.value)} data-testid={`role-${u.user_id}`}>
+                              <option value="customer">customer</option>
+                              <option value="worker">worker</option>
+                              <option value="marketer">marketer</option>
+                              <option value="developer">developer</option>
+                              <option value="admin">admin</option>
+                            </select>
+                          ) : <span className="text-xs text-neutral-400">—</span>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </TabsContent>
+
           <TabsContent value="portfolio" className="mt-4">
             <PortfolioEditor portfolio={portfolio} refresh={refreshAll} />
           </TabsContent>
 
-          {/* SETTINGS */}
           <TabsContent value="settings" className="mt-4">
             <SiteSettingsEditor settings={settings} onSave={refreshAll} />
           </TabsContent>
@@ -220,20 +257,16 @@ function PortfolioEditor({ portfolio, refresh }) {
     e.preventDefault();
     if (!title || paths.length === 0) { toast.error("Title + photo required"); return; }
     try {
-      for (const p of paths) {
-        await api.post("/portfolio", { title, description: desc, storage_path: p });
-      }
+      for (const p of paths) await api.post("/portfolio", { title, description: desc, storage_path: p });
       toast.success("Added");
       setTitle(""); setDesc(""); setPaths([]);
       refresh();
     } catch { toast.error("Failed"); }
   };
-
   const remove = async (id) => {
     if (!confirm("Delete?")) return;
     try { await api.delete(`/portfolio/${id}`); refresh(); } catch { toast.error("Failed"); }
   };
-
   return (
     <div className="grid lg:grid-cols-3 gap-0 border-2 border-black" data-testid="admin-portfolio-section">
       <form onSubmit={add} className="p-6 border-r border-black bg-[#F9FAFB] grid gap-3">
@@ -266,8 +299,12 @@ function SiteSettingsEditor({ settings, onSave }) {
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
   const save = async (e) => {
     e.preventDefault();
-    try { await api.put("/site/settings", form); toast.success("Saved"); onSave?.(); }
-    catch { toast.error("Save failed"); }
+    try {
+      const payload = { ...form };
+      if (payload.minimum_charge !== undefined) payload.minimum_charge = parseFloat(payload.minimum_charge);
+      if (payload.outlet_price !== undefined) payload.outlet_price = parseFloat(payload.outlet_price);
+      await api.put("/site/settings", payload); toast.success("Saved"); onSave?.();
+    } catch { toast.error("Save failed"); }
   };
   return (
     <form onSubmit={save} className="border-2 border-black p-6 bg-white grid gap-4 max-w-2xl" data-testid="admin-settings-form">
@@ -289,9 +326,19 @@ function SiteSettingsEditor({ settings, onSave }) {
           <input value={form.contact_email || ""} onChange={set("contact_email")} data-testid="settings-email" />
         </div>
       </div>
-      <div>
-        <label className="overline">Service area</label>
-        <input value={form.service_area || ""} onChange={set("service_area")} data-testid="settings-area" />
+      <div className="grid md:grid-cols-3 gap-4">
+        <div>
+          <label className="overline">Service area</label>
+          <input value={form.service_area || ""} onChange={set("service_area")} data-testid="settings-area" />
+        </div>
+        <div>
+          <label className="overline">Outlet/switch price ($)</label>
+          <input type="number" min="0" step="0.01" value={form.outlet_price ?? 25} onChange={set("outlet_price")} data-testid="settings-outlet" />
+        </div>
+        <div>
+          <label className="overline">Job minimum ($)</label>
+          <input type="number" min="0" step="0.01" value={form.minimum_charge ?? 50} onChange={set("minimum_charge")} data-testid="settings-min" />
+        </div>
       </div>
       <button className="btn-brutal dark" data-testid="settings-save-btn">Save settings</button>
     </form>

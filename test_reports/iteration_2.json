@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 2 backend testing complete. Added /app/backend/tests/test_iteration2.py with 34 new tests covering email/password register/login/forgot-password/reset-password, hybrid auth sessions, founder-only RBAC on PUT /admin/users/{id}/role, /users/me profile + password update, minimum_charge=50 enforcement on POST /api/jobs, outlet_price=25 default, and graceful SMTP failure. Updated 1 regression test (outlet job quote now $50 because minimum_charge bumped from $25→$50). Total 66/66 tests pass against live backend.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "send_email()", "issue": "Gmail SMTP credentials in .env (SMTP_PASSWORD='Bigbilly101!') are NOT a Google App Password - Gmail returns 535 BadCredentials on every send. send_email() catches the exception so endpoints still return 200, but every register/forgot/job POST logs an ERROR. To actually deliver mail, replace SMTP_PASSWORD with a Google App Password (16-char, no spaces) generated at myaccount.google.com/apppasswords."},
+      {"endpoint": "POST /api/auth/forgot-password", "issue": "Always returns {ok:true} as designed (prevents email enumeration). Verified token row IS created when user exists, NOT when missing. Good."},
+      {"endpoint": "POST /api/jobs (outlet/switch)", "issue": "When service_type contains 'switch' or 'outlet', base price is outlet_price=$25, but minimum_charge=$50 is applied via max(base, minimum) → quoted_amount becomes $50 even though product copy claims switch/outlet is fixed at $25. This contradicts the spec ('switch/outlet replacement is fixed at $25'). If $25 outlet is intended to bypass the $50 minimum, server.py line 654-655 needs to skip the minimum clamp for outlet jobs."},
+      {"endpoint": "POST /api/auth/register, /auth/login, /users/me, /jobs", "issue": "Endpoints still take payload: dict (no Pydantic models). Missing required keys (e.g. payload['customer_name']) throws KeyError → 500 instead of 422. Carried over from iteration_1."},
+      {"endpoint": "Backend logs", "issue": "Every email_welcome/email_quote_to_admin/email_quote_to_customer triple-fires SMTP attempts. With invalid SMTP creds, each POST /jobs produces 2 ERROR log lines. Log noise — non-functional."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_iteration2.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/iteration2_results.xml"
+  ],
+  "action_items": [
+    "CLARIFY product spec contradiction: outlet/switch jobs are advertised at $25 but minimum_charge=$50 forces them to $50. Either (a) drop the 'outlet=$25' messaging or (b) special-case outlet/switch in POST /api/jobs to skip the minimum clamp (change line 655 of server.py).",
+    "Replace SMTP_PASSWORD in /app/backend/.env with a real Google App Password to enable email delivery (currently logs are clean of 500s, but no mail actually leaves).",
+    "(Optional, carried over) Replace payload: dict with Pydantic models on POST /auth/register, /auth/login, /users/me, /jobs, /w9/sign, /payouts to return 422 instead of 500 on missing keys."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 874 lines and growing — auth, email, storage, jobs, payouts, portfolio, settings, admin all in one file. Strong recommendation to split into modules (auth.py, jobs.py, email_service.py, storage.py) before further iterations.",
+    "send_email() calls smtplib SMTP synchronously inside async handlers — blocks the event loop for up to 15s on each SMTP timeout. Should be offloaded to a background task (asyncio.to_thread, BackgroundTasks, or a queue).",
+    "POST /api/jobs sends BOTH admin AND customer emails synchronously inside the handler — doubles the latency. Use FastAPI BackgroundTasks.",
+    "set_session_cookie uses samesite='none' + secure=True which is correct for cross-origin SPA, but the JWT_SECRET in .env is unused (sessions are random tokens, not JWTs). Remove JWT_SECRET or actually use it.",
+    "Founder list is loaded once at import (FOUNDING_ADMINS = ...) — changing the env requires a backend restart. Acceptable but worth noting.",
+    "POST /api/jobs (line 655) outlet/switch base=$25 but minimum=$50 clamp negates the outlet pricing entirely. Logic bug or unclear spec.",
+    "/auth/register & /auth/session both insert into user_sessions but DO NOT delete prior sessions for the same user — sessions accumulate forever in the DB. Consider TTL index on expires_at or cleanup on login."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration2.py (new)",
+    "/app/backend/tests/backend_test.py (1 line: outlet quote $25 → $50 due to minimum_charge bump)"
+  ],
+  "success_rate": {"backend": "100% (66/66)", "frontend": "n/a (not requested)"},
+  "test_credentials": "Founders auto-promoted on register: noskotx@gmail.com / nossonkosowsky32@gmail.com (any password ≥8 chars). All test users created at runtime via POST /api/auth/register, prefixed test_/TEST_ for cleanup.",
+  "seed_data_creation": "All test users created via POST /api/auth/register (no direct DB seeding). Test data cleaned in setup_class/teardown_class with _cleanup_email() helper (removes user + sessions + reset tokens). teardown_module removes TEST_* jobs.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "66 backend tests pass (32 iter1 regression + 34 iter2 new). Run: `pytest /app/backend/tests/ -v`. SMTP fails gracefully with Gmail BadCredentials (expected — password is not an App Password). Outlet/switch pricing has a logic contradiction: marketed at $25 but clamped up to $50 by minimum_charge — needs product decision. /api/auth/session not exercised on the happy path (requires real Emergent OAuth browser flow), only negative paths. Frontend untested per request.",
+  "rca of the issue": "N/A — no failing tests. Two product/code concerns flagged for main agent: (1) outlet=$25 vs minimum=$50 contradiction in POST /api/jobs pricing logic (server.py line 655), (2) Gmail SMTP creds need a real App Password (16-char) before emails actually deliver — endpoints already handle the failure gracefully."
+}

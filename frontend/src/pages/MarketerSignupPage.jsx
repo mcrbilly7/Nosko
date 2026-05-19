@@ -9,7 +9,7 @@ import { BadgeDollarSign, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 
 export default function MarketerSignupPage() {
-  const { user, login, loading } = useAuth();
+  const { user, loginWithGoogle: login, loading } = useAuth();
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
   const [busy, setBusy] = useState(false);
@@ -58,7 +58,10 @@ export default function MarketerSignupPage() {
           <p className="text-neutral-700 mt-3 max-w-lg">
             Share your personal code. Anyone who books with it earns you 15% — paid weekly. Sign in to get your code.
           </p>
-          <button className="btn-brutal mt-8" onClick={login} data-testid="marketer-signin-btn">Sign in with Google</button>
+          <div className="flex flex-wrap gap-3 mt-8">
+            <button className="btn-brutal" onClick={login} data-testid="marketer-signin-btn">Continue with Google</button>
+            <a href="/login" className="btn-brutal ghost" data-testid="marketer-signin-email-btn">Email & password</a>
+          </div>
         </main>
         <Footer />
       </div>

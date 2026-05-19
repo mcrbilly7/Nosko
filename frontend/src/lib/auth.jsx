@@ -19,8 +19,6 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   useEffect(() => {
-    // CRITICAL: If returning from OAuth callback, skip the /me check.
-    // AuthCallback will exchange the session_id and establish the session first.
     if (window.location.hash?.includes("session_id=")) {
       setLoading(false);
       return;
@@ -28,10 +26,32 @@ export const AuthProvider = ({ children }) => {
     checkAuth();
   }, [checkAuth]);
 
-  const login = () => {
+  const loginWithGoogle = () => {
     // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
     const redirectUrl = window.location.origin + "/dashboard";
     window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+  };
+
+  const loginWithPassword = async (email, password) => {
+    const res = await api.post("/auth/login", { email, password });
+    if (res.data?.session_token) localStorage.setItem("nosko_session_token", res.data.session_token);
+    setUser(res.data?.user || null);
+    return res.data?.user;
+  };
+
+  const register = async (email, password, name) => {
+    const res = await api.post("/auth/register", { email, password, name });
+    if (res.data?.session_token) localStorage.setItem("nosko_session_token", res.data.session_token);
+    setUser(res.data?.user || null);
+    return res.data?.user;
+  };
+
+  const forgotPassword = async (email) => {
+    await api.post("/auth/forgot-password", { email, origin: window.location.origin });
+  };
+
+  const resetPassword = async (token, password) => {
+    await api.post("/auth/reset-password", { token, password });
   };
 
   const logout = async () => {
@@ -42,10 +62,18 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, setUser, loading, login, logout, refresh: checkAuth }}>
+    <AuthContext.Provider value={{ user, setUser, loading, loginWithGoogle, loginWithPassword, register, forgotPassword, resetPassword, logout, refresh: checkAuth }}>
       {children}
     </AuthContext.Provider>
   );
 };
 
 export const useAuth = () => useContext(AuthContext);
+
+export function formatApiError(err) {
+  const detail = err?.response?.data?.detail;
+  if (!detail) return err?.message || "Something went wrong.";
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) return detail.map((e) => e?.msg || JSON.stringify(e)).join(" ");
+  return String(detail);
+}

@@ -84,7 +84,8 @@ def test_create_job_no_auth_invalid_referral_nulled():
     assert r.status_code == 200, r.text
     j = r.json()
     assert j["referral_code"] is None
-    assert j["quoted_amount"] == 25.0
+    # iteration_2: minimum_charge=50 forces outlet job up from $25 base to $50
+    assert j["quoted_amount"] == 50.0
     assert j["status"] == "new"
     assert j["job_id"].startswith("job_")
 

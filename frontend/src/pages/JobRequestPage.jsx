@@ -139,13 +139,13 @@ export default function JobRequestPage() {
         </div>
 
         <aside className="p-8 bg-[#FFD600] border-t lg:border-t-0 border-black">
-          <div className="overline">Pricing</div>
+          <div className="overline">Set price</div>
           <div className="font-display text-7xl tracking-tighter mt-1">$25</div>
           <div className="overline">Switch / Outlet replacement</div>
           <div className="mt-6 border-t border-black pt-4">
             <div className="overline">Minimum charge</div>
-            <div className="font-display text-4xl tracking-tighter">$25</div>
-            <p className="text-sm mt-2">Every dispatched job has a $25 floor — even quick checks.</p>
+            <div className="font-display text-5xl tracking-tighter">$50</div>
+            <p className="text-sm mt-2">Every dispatched job has a $50 floor — covers travel + diagnosis.</p>
           </div>
           <div className="mt-8 border-t border-black pt-4">
             <div className="overline">What you get</div>
