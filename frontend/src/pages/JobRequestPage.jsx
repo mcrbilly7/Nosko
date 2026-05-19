@@ -51,6 +51,7 @@ export default function JobRequestPage() {
   };
 
   if (done) {
+    const trackUrl = `${window.location.origin}/track/${done.job_id}`;
     return (
       <div className="bg-white min-h-screen flex flex-col">
         <Navbar />
@@ -63,7 +64,16 @@ export default function JobRequestPage() {
             </p>
             <div className="overline mt-6">Quoted</div>
             <div className="font-display text-5xl">${done.quoted_amount.toFixed(2)}</div>
-            <a href="/" className="btn-brutal mt-8 inline-flex" data-testid="request-success-home">Back home</a>
+
+            <div className="mt-8 border-2 border-black bg-[#FFD600] p-5" data-testid="job-track-link-block">
+              <div className="overline">Track your job anytime — no login</div>
+              <div className="font-mono text-sm break-all mt-1">{trackUrl}</div>
+              <a href={trackUrl} className="btn-brutal dark mt-3 inline-flex" data-testid="job-track-btn">Open tracking page</a>
+            </div>
+
+            <div className="flex flex-wrap gap-2 mt-6">
+              <a href="/" className="btn-brutal ghost" data-testid="request-success-home">Back home</a>
+            </div>
           </div>
         </main>
         <Footer />

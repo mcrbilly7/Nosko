@@ -1,0 +1,51 @@
+{
+  "summary": "Iteration 3 backend testing complete. Added /app/backend/tests/test_iteration3.py with 15 new tests covering: (a) public GET /api/jobs/track/{job_id} (safe subset, 404, worker name when assigned, photo_paths), (b) auto-payout on PUT /api/jobs/{id}/status=completed with correct 15%/50%/rest split (3 payouts with marketer, 2 without), (c) re-trigger completed→completed produces no duplicate payouts, (d) auto_payout=false flag skips payout creation, (e) intermediate status transitions don't fire payouts, (f) 400/404/403 error paths on status endpoint, (g) Stripe onboard graceful 502 (Connect not enabled on platform), (h) real Gmail SMTP non-crash for forgot-password and POST /api/jobs. All 81/81 tests pass (32 iter1 + 34 iter2 + 15 iter3). Verified in backend logs: 'Email sent →' lines confirm real Gmail SMTP delivery, and Stripe returns the expected 'sign up for Connect' 400 which our endpoint wraps as 502.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "_auto_payout_on_complete", "issue": "Founder lookup uses db.users.find_one({'email': {'$in': list(FOUNDING_ADMINS)}}) which returns the FIRST founder by Mongo's natural insertion order. If both founders exist and only the 2nd one was intended as platform-share recipient, behavior is non-deterministic. Currently fine because tests register noskotx@gmail.com first, but consider an explicit 'platform_admin' flag or pin to FOUNDING_ADMINS[0]."},
+      {"endpoint": "_auto_payout_on_complete", "issue": "Platform share is created ONLY when a founding admin user exists in db.users. If no founder has ever registered, the 35%/50% platform share is silently dropped (paid_sum < amount, money 'disappears' from the books). Add a fallback: even with no founder user_id, insert a payout record with user_id=null or company-account ID, or surface a warning."},
+      {"endpoint": "_auto_payout_on_complete", "issue": "Stripe Transfer is attempted for type='referral' and 'work' but NOT for 'platform' even though the founder could have a Connect account too. Probably intentional (platform keeps funds), but worth a comment."},
+      {"endpoint": "_auto_payout_on_complete", "issue": "Note string `int(s['amount']/amount*100)` will be 15/50/35 for marketer-included; 50/50 without. But amount is asserted >0 only after coercion to float — if quoted_amount is None or a string '0', it returns []. Fine; just confirm POST /jobs always coerces quoted_amount to float (it does at line 662)."},
+      {"endpoint": "PUT /api/jobs/{id}/status", "issue": "Endpoint sets new status BEFORE checking transition. If _auto_payout_on_complete raises (e.g. Mongo down mid-write), status='completed' but payouts not created — inconsistent state. Wrap in a try/except that reverts status, or write payouts first then flip status."},
+      {"endpoint": "POST /api/stripe/onboard", "issue": "Returns 502 as expected when platform Connect is disabled — backend handles it gracefully (verified in logs: 'Stripe Account.create failed: ... sign up for Connect'). No fix needed; flagged as a known prerequisite for owner."},
+      {"endpoint": "send_email()", "issue": "Real Gmail SMTP now works (verified 'Email sent →' lines). Still runs SYNCHRONOUSLY inside async handlers — POST /jobs holds the request open for ~3-4s while sending two emails sequentially. Move to BackgroundTasks (carry-over from iter2)."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration3.py",
+    "/app/backend/tests/test_iteration2.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/iteration3_results.xml",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Iter3 — Optional) Decide deterministic founder for platform share (pin to FOUNDING_ADMINS[0] or add explicit platform_account_user_id setting).",
+    "(Iter3 — Optional) Insert platform payout even when founder user not yet registered, so the books always balance.",
+    "(Iter3 — Optional) Wrap status update + auto-payout in a try/except so a payout failure doesn't leave job marked completed with no payouts.",
+    "(Carry-over from iter2) Offload SMTP sending to FastAPI BackgroundTasks — POST /jobs latency now ~3-4s on real SMTP.",
+    "(Carry-over from iter2) server.py is now 1110 lines — strongly recommend splitting into auth.py, jobs.py, payouts.py, stripe_service.py, email_service.py modules before further iterations.",
+    "(Carry-over from iter2) Replace `payload: dict` with Pydantic models on POST /auth/register, /auth/login, /users/me, /jobs, /jobs/{id}/status, /payouts, /workers/signup, /marketers/signup, /w9/sign to return 422 instead of 500 on missing keys.",
+    "(External) Owner must complete Stripe Connect platform signup at https://dashboard.stripe.com/connect before real worker/marketer payouts can flow. Until then auto_payouts.method='manual' for all splits — verified working."
+  ],
+  "critical_code_review_comments": [
+    "_auto_payout_on_complete (server.py:745-809) does N sequential Stripe Transfer.create() calls inside an async handler — for 3 splits with Connect enabled that's 3 sync HTTP round-trips blocking the event loop. Use asyncio.to_thread or asyncio.gather with executor.",
+    "Re-trigger guard is correct (only fires on prev_status != 'completed') but relies on reading job BEFORE the $set. Race condition: two simultaneous PUT status=completed requests would both see prev_status='assigned' and both fire payouts. Add an atomic findOneAndUpdate filter on status != 'completed' to make the transition idempotent.",
+    "GET /api/jobs/track/{job_id} returns customer_name but not customer_email/phone — good (no PII leak). However, customer_name itself is technically PII; consider letting the customer opt out, or showing only initials on shared public links.",
+    "Stripe Transfer.create uses transfer_group=job_id — good for reconciliation. metadata includes user_id and type — good for Stripe Sigma queries.",
+    "FOUNDING_ADMINS is a Python set (loaded at import) — list(FOUNDING_ADMINS) iteration order is non-deterministic across restarts; combined with the founder lookup issue above, the platform payout recipient could silently change. Pin to a sorted tuple or env-list order.",
+    "send_email() now works against Gmail SMTP (App Password is correctly set). Each POST /jobs triggers TWO synchronous email sends (admin + customer) ≈ 3-4s. Strong recommendation to move to BackgroundTasks.",
+    "No webhook handler for Stripe transfer.failed / transfer.reversed events — if a Transfer succeeds in Stripe but then bounces later (e.g. KYC issue, account closed), our payouts collection stays status='paid' permanently. Add /api/stripe/webhook."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration3.py (NEW — 15 tests)"
+  ],
+  "success_rate": {"backend": "100% (81/81)", "frontend": "n/a (not requested)"},
+  "test_credentials": "Founder noskotx@gmail.com / AdminTest12345 auto-promoted to admin on register (FOUNDING_ADMINS env). Test users created on-demand via POST /api/auth/register with TEST_/test_ prefix.",
+  "seed_data_creation": "All seed data created at runtime via API: worker (POST /workers/signup), marketer (POST /marketers/signup to get referral_code), customer jobs (POST /jobs). Cleanup in teardown_class removes users, sessions, profiles, payouts, and jobs. Founder user is NOT cleaned up between tests (intentional — needed for platform-share assignments).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "81 backend tests pass (32 iter1 backend_test.py + 34 iter2 test_iteration2.py + 15 iter3 test_iteration3.py). Run: `pytest /app/backend/tests/ -v` (~3 min — real Gmail SMTP adds 1-2s per email-triggering test). Real Gmail SMTP IS sending mail successfully (verified `Email sent →` log lines). Stripe Connect is NOT yet enabled on the platform — /api/stripe/onboard returns 502 with the 'sign up for Connect' message, and auto-payouts always use method='manual'. To test real Stripe Transfers later: owner enables Connect → worker/marketer completes onboarding → set worker_profiles.stripe_payouts_enabled=true → POST /jobs/{id}/status=completed should set auto_payouts[*].method='stripe' with a stripe_transfer_id. Service_type containing 'switch' or 'outlet' still hits the minimum_charge=$50 clamp (carry-over product question from iter2, not retested).",
+  "rca of the issue": "N/A — no failing tests. All Iter3 deliverables verified end-to-end against live backend with real Mongo + real Gmail SMTP + live Stripe API."
+}

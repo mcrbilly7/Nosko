@@ -119,7 +119,8 @@ def email_quote_to_admin(job: dict):
     send_email(COMPANY_EMAIL, f"New quote request — {job['customer_name']}", html)
 
 
-def email_quote_to_customer(job: dict):
+def email_quote_to_customer(job: dict, origin: Optional[str] = None):
+    track_url = f"{origin or 'https://nosko.com'}/track/{job['job_id']}"
     html = f"""
     <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#0A0A0A">
       <div style="background:#FFD600;padding:18px 24px;border:2px solid #0A0A0A">
@@ -129,6 +130,8 @@ def email_quote_to_customer(job: dict):
         <p>Hey {job['customer_name']},</p>
         <p>We got your request <b>{job['job_id']}</b> for <b>{job['service_type']}</b> at {job['address']}.</p>
         <p>A handyman from our DFW team will be in touch shortly.</p>
+        <p style="margin:24px 0"><a href="{track_url}" style="background:#0A0A0A;color:#FFD600;padding:12px 20px;text-decoration:none;border:2px solid #0A0A0A;display:inline-block">TRACK YOUR JOB</a></p>
+        <p style="font-size:12px;color:#666">No login needed. Bookmark the link to check status anytime.</p>
         <p>— Nosko Handyman · {COMPANY_EMAIL}</p>
       </div>
     </div>
@@ -644,7 +647,7 @@ async def download(path: str):
 
 # -------------------- Jobs --------------------
 @api.post("/jobs")
-async def create_job(payload: dict):
+async def create_job(payload: dict, request: Request):
     now = datetime.now(timezone.utc).isoformat()
     referral_code = (payload.get("referral_code") or "").upper().strip() or None
     if referral_code:
@@ -677,7 +680,8 @@ async def create_job(payload: dict):
     # Fire-and-forget emails (sync — but small)
     try:
         email_quote_to_admin(job)
-        email_quote_to_customer(job)
+        origin = payload.get("origin") or request.headers.get("origin") or str(request.base_url).rstrip("/")
+        email_quote_to_customer(job, origin)
     except Exception as e:
         logger.error(f"Email dispatch failed for {job['job_id']}: {e}")
     return job
@@ -706,15 +710,121 @@ async def assign_job(job_id: str, payload: dict, _: dict = Depends(require_admin
     return {"ok": True}
 
 
+@api.get("/jobs/track/{job_id}")
+async def track_job(job_id: str):
+    """Public endpoint — no auth. Returns safe subset of job info for the customer's tracking page."""
+    job = await db.jobs.find_one({"job_id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(404, "Job not found")
+    worker_name = None
+    if job.get("assigned_worker_id"):
+        w = await db.users.find_one({"user_id": job["assigned_worker_id"]}, {"_id": 0, "name": 1})
+        worker_name = w.get("name") if w else None
+    # ETA mapping (simple)
+    eta_map = {
+        "new": "Reviewing your request — we usually respond within 24 hours.",
+        "assigned": "Handyman assigned — they'll reach out to schedule.",
+        "in_progress": "Job in progress.",
+        "completed": "Completed. Hope it went great!",
+        "cancelled": "Cancelled.",
+    }
+    return {
+        "job_id": job["job_id"],
+        "customer_name": job["customer_name"],
+        "service_type": job["service_type"],
+        "address": job["address"],
+        "status": job["status"],
+        "eta_message": eta_map.get(job["status"], ""),
+        "quoted_amount": job["quoted_amount"],
+        "assigned_worker_name": worker_name,
+        "created_at": job["created_at"],
+        "photo_paths": job.get("photo_paths", []),
+    }
+
+
+async def _auto_payout_on_complete(job: dict, admin_user: dict):
+    """When a job is marked completed, automatically split the quoted amount:
+       15% to marketer (if referral), 50% to worker, remainder to platform.
+       Creates payout records and triggers Stripe Transfers when recipients are Connect-enabled.
+    """
+    amount = float(job.get("quoted_amount") or 0)
+    if amount <= 0:
+        return []
+    worker_id = job.get("assigned_worker_id")
+    referral_code = job.get("referral_code")
+    marketer_user_id = None
+    if referral_code:
+        m = await db.users.find_one({"referral_code": referral_code}, {"_id": 0, "user_id": 1})
+        if m:
+            marketer_user_id = m["user_id"]
+
+    splits = []
+    if marketer_user_id:
+        splits.append({"user_id": marketer_user_id, "amount": round(amount * 0.15, 2), "type": "referral"})
+    if worker_id:
+        splits.append({"user_id": worker_id, "amount": round(amount * 0.50, 2), "type": "work"})
+    # Platform/admin share (rest) - record as a payout to the founder so the books balance
+    paid_sum = sum(s["amount"] for s in splits)
+    platform_share = round(amount - paid_sum, 2)
+    if platform_share > 0:
+        founder = await db.users.find_one({"email": {"$in": list(FOUNDING_ADMINS)}}, {"_id": 0, "user_id": 1})
+        if founder:
+            splits.append({"user_id": founder["user_id"], "amount": platform_share, "type": "platform"})
+
+    created = []
+    for s in splits:
+        stripe_transfer_id = None
+        method = "manual"
+        # Attempt Stripe Transfer for worker/marketer if they have Connect set up + payouts enabled
+        if s["type"] in ("work", "referral") and STRIPE_API_KEY:
+            coll, profile = await _get_worker_or_marketer_profile(s["user_id"])
+            if profile and profile.get("stripe_account_id") and profile.get("stripe_payouts_enabled"):
+                try:
+                    transfer = stripe.Transfer.create(
+                        amount=int(round(s["amount"] * 100)),
+                        currency="usd",
+                        destination=profile["stripe_account_id"],
+                        transfer_group=job["job_id"],
+                        metadata={"job_id": job["job_id"], "type": s["type"], "user_id": s["user_id"]},
+                    )
+                    stripe_transfer_id = transfer["id"]
+                    method = "stripe"
+                except stripe.error.StripeError as e:
+                    logger.error(f"Auto-payout Stripe Transfer failed for {s['user_id']}: {e}")
+        payout = {
+            "payout_id": f"pay_{uuid.uuid4().hex[:10]}",
+            "user_id": s["user_id"],
+            "amount": s["amount"],
+            "type": s["type"],
+            "job_id": job["job_id"],
+            "note": f"Auto-payout on job completion ({int(s['amount']/amount*100)}% of ${amount:.2f})",
+            "method": method,
+            "stripe_transfer_id": stripe_transfer_id,
+            "status": "paid",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.payouts.insert_one(payout)
+        payout.pop("_id", None)
+        created.append(payout)
+    return created
+
+
 @api.put("/jobs/{job_id}/status")
-async def update_job_status(job_id: str, payload: dict, _: dict = Depends(require_admin)):
+async def update_job_status(job_id: str, payload: dict, admin: dict = Depends(require_admin)):
     status = payload.get("status")
     if status not in ("new", "assigned", "in_progress", "completed", "cancelled"):
         raise HTTPException(400, "invalid status")
-    res = await db.jobs.update_one({"job_id": job_id}, {"$set": {"status": status}})
-    if res.matched_count == 0:
+    job = await db.jobs.find_one({"job_id": job_id}, {"_id": 0})
+    if not job:
         raise HTTPException(404, "Job not found")
-    return {"ok": True}
+    prev_status = job.get("status")
+    await db.jobs.update_one({"job_id": job_id}, {"$set": {"status": status}})
+
+    auto_payouts = []
+    if status == "completed" and prev_status != "completed" and payload.get("auto_payout", True):
+        job["status"] = "completed"
+        auto_payouts = await _auto_payout_on_complete(job, admin)
+    return {"ok": True, "auto_payouts": auto_payouts}
 
 
 # -------------------- Stripe Connect (Express) --------------------

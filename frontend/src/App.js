@@ -14,6 +14,7 @@ import ForgotPasswordPage from "@/pages/ForgotPasswordPage";
 import ResetPasswordPage from "@/pages/ResetPasswordPage";
 import AccountSettings from "@/pages/AccountSettings";
 import StripeReturnPage from "@/pages/StripeReturnPage";
+import TrackJobPage from "@/pages/TrackJobPage";
 import WorkerDashboard from "@/pages/WorkerDashboard";
 import MarketerDashboard from "@/pages/MarketerDashboard";
 import AdminDashboard from "@/pages/AdminDashboard";
@@ -27,6 +28,7 @@ function AppRouter() {
     <Routes>
       <Route path="/" element={<LandingPage />} />
       <Route path="/request" element={<JobRequestPage />} />
+      <Route path="/track/:jobId" element={<TrackJobPage />} />
       <Route path="/join/worker" element={<WorkerSignupPage />} />
       <Route path="/join/marketer" element={<MarketerSignupPage />} />
       <Route path="/login" element={<LoginPage />} />
