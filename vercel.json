@@ -7,8 +7,7 @@
     },
     "backend": {
       "entrypoint": "backend",
-      "routePrefix": "/_/backend",
-      "src": "server.py"
+      "routePrefix": "/_/backend"
     }
   }
 }
